@@ -2,161 +2,136 @@ package main
 
 import (
 	"./message"
-	"database/sql"
 	"fmt"
 	"github.com/golang/protobuf/proto"
-	"math/rand"
 	"net"
 	"os"
-	"time"
-
-	_ "github.com/lib/pq"
 )
 
-type ChannelRow struct {
-	time time.Time
-	id int32
-	sub int32
-}
-
 const (
-	port = "0.0.0.0:3335"
-	sqlUrl = "postgresql://admin@localhost:5432/youtube?sslmode=disable"
-	sqlInsert = "INSERT INTO youtube.stats.channels (time, id, subs) VALUE ($1, $2, $3)"
-	cacheSize = 1000
-	readSize = 2000
+	keyUrl = "0.0.0.0:3333"
+	cacheUrl = "0.0.0.0:3334"
+	writeUrl = "0.0.0.0:3335"
+	google = "https://www.googleapis.com/youtube/v3/channels?part=statistics&key=%s&id=%s"
+	bufSize = 2000
 )
 
 var (
-	cache []ChannelRow
-	pipe chan message.ChannelMessage
+	path string
 )
 
-func handleConnection(c net.Conn) {
-	bytes := make([]byte, readSize)
-	{
-		{
-			n, err := c.Read(bytes)
-			if err != nil {
-				fmt.Println(err)
-				os.Exit(7)
-			}
-
-			fmt.Println("Retrieved", n, "bytes")
-			if n < readSize {
-				bytes = bytes[:n]
-			}
-		}
-
-		{
-			err := c.Close()
-			if err != nil {
-				fmt.Println(err)
-				os.Exit(4)
-			}
-		}
-	}
-
-	var msg message.ChannelMessage
-	{
-		err := proto.Unmarshal(bytes, &msg)
-		if err != nil {
-			fmt.Println("Protobuf parsing error:", err)
-			return
-		}
-	}
-
-	pipe <- msg
-}
-
-func msgHandler() {
-	for {
-		fmt.Println("Waiting for message")
-		msg := <- pipe
-
-		fmt.Println("Received", msg)
-		for i := 0; i < len(msg.Ids); i++ {
-			time := time.Now()
-			id := msg.Ids[i]
-			sub := msg.Subs[i]
-
-			row := ChannelRow{time, id, sub}
-			cache = append(cache, row)
-		}
-
-		if len(cache) >= cacheSize {
-			write()
-		}
-	}
-}
-
-func write() {
-	fmt.Println("Writing", cacheSize, "channels")
-	db, err := sql.Open("postgres", sqlUrl)
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(5)
-	}
-
-	defer func() {
-		fmt.Println("Closing sql connection")
-		_ = db.Close()
-	}()
-
-	txn, err := db.Begin()
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(8)
-	}
-
-	defer func() {
-		err = txn.Commit()
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(9)
-		}
-	}()
-
-	for i := 0; i < cacheSize; i++ {
-		row := cache[i]
-		_, err := txn.Exec(sqlInsert, row.time, row.id, row.sub)
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(6)
-		}
-	}
-
-	cache = cache[cacheSize:]
-	fmt.Println("New size of cache", len(cache))
-}
-
 func init() {
-	fmt.Println("Cache service started")
-	rand.Seed(time.Now().Unix())
+	fmt.Println("Random poller started")
+	path = os.Args[0]
+	fmt.Println("Using path", path)
 }
 
-func main() {
-	server, err := net.Listen("tcp4", port)
-	{
+func getKey() string {
+	conn, err := net.Dial("tcp4", keyUrl)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+
+	defer func() {
+		err := conn.Close()
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(2)
 		}
+	}()
+
+	{
+		_, err := conn.Write([]byte{1})
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(3)
+		}
+	}
+
+	var key [24]byte
+	{
+		var tmp []byte
+		n, err := conn.Read(tmp)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(4)
+		}
+
+		if n != 24 {
+			fmt.Println("Bad key size")
+			os.Exit(5)
+		}
+
+		for i := 0; i < 24; i++ {
+			key[i] = tmp[i]
+		}
+	}
+
+	keyStr := string(key[:])
+	fmt.Println("Using key", keyStr)
+	return keyStr
+}
+
+func getChannels() message.ChannelMessage {
+	conn, err := net.Dial("tcp4", keyUrl)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
 	}
 
 	defer func() {
-		_ = server.Close()
-	}()
-
-	for {
-		fmt.Println("Waiting for connection")
-		connection, err := server.Accept()
+		err := conn.Close()
 		if err != nil {
 			fmt.Println(err)
-			fmt.Println("Closing server")
-			_ = server.Close()
+			os.Exit(2)
+		}
+	}()
+
+	{
+		_, err := conn.Write([]byte{1})
+		if err != nil {
+			fmt.Println(err)
 			os.Exit(3)
 		}
-		go handleConnection(connection)
+	}
+
+	{
+		var tmp []byte
+		n, err := conn.Read(tmp)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(5)
+		}
+
+		var msg message.ChannelMessage
+		buf := tmp[:n]
+
+		err = proto.Unmarshal(buf, &msg)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(6)
+		}
+
+		fmt.Println("Retrieved channels:", msg)
+		return msg
+	}
+}
+
+func getMetrics(key string, msg message.ChannelMessage) []byte {
+	return []byte{}
+}
+
+func sendPayload(bytes []byte) {
+
+}
+
+func main() {
+	for {
+		key := getKey()
+		channels := getChannels()
+
+		bytes := getMetrics(key, channels)
+		sendPayload(bytes)
 	}
 }
